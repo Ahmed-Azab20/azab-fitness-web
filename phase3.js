@@ -487,7 +487,7 @@ async function onProgressClick(event) {
   else if (action === 'cancel-sleep') { $('#p3-sleep-form', progress).reset(); $('#p3-sleep-form', progress).elements.entry_id.value = ''; button.hidden = true; }
   else if (action === 'cancel-measure') { $('#p3-measure-form', progress).reset(); $('#p3-measure-form', progress).elements.entry_id.value = ''; $('.p3-custom-measure', progress).hidden = true; button.hidden = true; }
 }
-async function refresh() { await Promise.all([renderHome(), renderProgress()]); }
+async function refresh() { await Promise.all([renderHome(), renderProgress(), window.azabRenderCoachHome?.()]); }
 
 export async function initPhase3() {
   db = await openDB();
