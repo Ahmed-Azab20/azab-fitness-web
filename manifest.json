@@ -1,0 +1,1 @@
+{"id":"./","name":"Azab Fitness OS","short_name":"Azab Fitness","description":"Personal offline fitness tracker","start_url":"./","scope":"./","display":"standalone","background_color":"#10131b","theme_color":"#10131b","orientation":"portrait-primary","icons":[{"src":"icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]}
