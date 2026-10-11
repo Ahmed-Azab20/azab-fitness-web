@@ -1,7 +1,7 @@
 import { buildWeeklyReport, evaluateCoachRules, filterActiveCoachCards } from './coach-core.mjs';
 
 const DB_NAME = 'azab-fitness-os';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 const STATE_KEY = 'phase5_coach_state';
 const DISMISS_MS = 7 * 24 * 60 * 60 * 1000;
 const $ = (selector, root = document) => root.querySelector(selector);

@@ -1,8 +1,8 @@
 import { FOOD_SEEDS } from './food-seeds.js';
-import { buildFoodSnapshot, effectiveTargetsForDate, macroEnergyCheck, nutritionPer100g, scaleNutrition, sumNutrition } from './nutrition-core.mjs';
+import { buildFoodSnapshot, effectiveTargetsForDate, macroEnergyCheck, nutritionPer100g, restoreSavedMealWithItems, scaleNutrition, sumNutrition } from './nutrition-core.mjs';
 
 const DB_NAME = 'azab-fitness-os';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const uid = () => crypto.randomUUID();
@@ -109,8 +109,27 @@ function all(storeName) {
 function transaction(storeNames, operation) {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(storeNames, 'readwrite');
-    try { operation(tx); } catch (error) { tx.abort(); reject(error); return; }
-    tx.oncomplete = () => resolve();
+    const writes = [];
+    const trackedTx = {
+      objectStore(storeName) {
+        const store = tx.objectStore(storeName);
+        return new Proxy(store, {
+          get(target, property) {
+            const method = Reflect.get(target, property, target);
+            if (property === 'put' || property === 'add') return (row, ...args) => {
+              writes.push([storeName, row]);
+              return method.apply(target, [row, ...args]);
+            };
+            return typeof method === 'function' ? method.bind(target) : method;
+          },
+        });
+      },
+    };
+    try { operation(trackedTx); } catch (error) { tx.abort(); reject(error); return; }
+    tx.oncomplete = () => {
+      for (const [storeName, row] of writes) window.azabQueueSyncWrite?.(storeName, row);
+      resolve();
+    };
     tx.onerror = () => reject(tx.error || new Error('IndexedDB transaction failed.'));
     tx.onabort = () => reject(tx.error || new Error('IndexedDB transaction aborted.'));
   });
@@ -569,8 +588,16 @@ async function restoreRow(storeName, id) {
   if (!['foods', 'food_logs', 'saved_meals'].includes(storeName)) return;
   const row = (storeName === 'foods' ? cache.foods : storeName === 'food_logs' ? cache.logs : cache.meals).find(item => item.id === id && item.deleted_at);
   if (!row) return;
-  row.deleted_at = null; row.updated_at = now();
-  await transaction([storeName], tx => tx.objectStore(storeName).put(row));
+  if (storeName === 'saved_meals') {
+    const restored = restoreSavedMealWithItems(row, await all('saved_meal_items'), now());
+    await transaction(['saved_meals', 'saved_meal_items'], tx => {
+      tx.objectStore('saved_meals').put(restored.meal);
+      for (const item of restored.items) tx.objectStore('saved_meal_items').put(item);
+    });
+  } else {
+    row.deleted_at = null; row.updated_at = now();
+    await transaction([storeName], tx => tx.objectStore(storeName).put(row));
+  }
   await renderNutrition(); notify(tr('saved'));
 }
 function openTargets() {

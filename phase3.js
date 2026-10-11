@@ -2,7 +2,7 @@ import { dailyConsistencyScore, dailyNutrition, dataUrlToImageBlob, goalProgress
 import { effectiveTargetsForDate } from './nutrition-core.mjs';
 
 const DB_NAME = 'azab-fitness-os';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const uid = () => crypto.randomUUID();
@@ -91,8 +91,9 @@ function get(store, id) {
 function put(store, row) {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(store, 'readwrite');
-    tx.objectStore(store).put({ ...row, ...stamp(row) });
-    tx.oncomplete = resolve;
+    const savedRow = { ...row, ...stamp(row) };
+    tx.objectStore(store).put(savedRow);
+    tx.oncomplete = () => { window.azabQueueSyncWrite?.(store, savedRow); resolve(); };
     tx.onerror = () => reject(tx.error);
     tx.onabort = () => reject(tx.error || new Error('Transaction aborted'));
   });
@@ -437,7 +438,7 @@ async function saveWidgets() {
   const hidden = inputs.filter(input => !input.checked).map(input => input.dataset.p3WidgetToggle);
   const settings = await all('settings');
   const existing = settings.find(row => row.key === 'dashboard_widgets' && !row.deleted_at);
-  await put('settings', { ...(existing || {}), id: existing?.id || uid(), key: 'dashboard_widgets', value: { hidden } });
+  await put('settings', { ...(existing || {}), id: 'settings:dashboard_widgets', key: 'dashboard_widgets', value: { hidden } });
   toast(tr('savePrefs')); await renderHome();
 }
 function openPhoto(row) {

@@ -7,7 +7,7 @@ import {
 } from './progression-core.mjs';
 
 const DB_NAME = 'azab-fitness-os';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 const $ = (selector, root = document) => root.querySelector(selector);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 const locale = () => document.documentElement.lang === 'en' ? 'en' : 'ar';

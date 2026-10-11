@@ -1,5 +1,5 @@
 const DB_NAME = 'azab-fitness-os';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 const NEW_STORES = ['programs', 'program_days', 'exercises', 'program_exercises'];
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -315,7 +315,7 @@ async function saveForm(event) {
   const activeGoal = goals.filter(row => row.status === 'active' && !row.deleted_at).sort((a, b) => b.updated_at - a.updated_at)[0] || null;
   const goalSame = activeGoal && activeGoal.goal_type === goalType && Number(activeGoal.target_weight_kg) === targetWeight && Number(activeGoal.target_rate_kg_per_week) === targetRate && (activeGoal.target_date || null) === targetDate;
   const currentProgram = programs.filter(row => row.is_active && !row.deleted_at).sort((a, b) => b.updated_at - a.updated_at)[0] || null;
-  const programId = currentProgram?.id || uid();
+  const programId = currentProgram?.id || 'program:active';
   const currentDays = oldDays.filter(row => row.program_id === programId && !row.deleted_at);
   const currentDayIds = new Set(currentDays.map(row => row.id));
   const currentRelations = oldRelations.filter(row => currentDayIds.has(row.program_day_id) && !row.deleted_at);
@@ -323,7 +323,7 @@ async function saveForm(event) {
   const keepRelationIds = new Set(days.flatMap(day => day.exercises.map(exercise => exercise.relation_id).filter(Boolean)));
   const writes = {
     profile: {
-      ...(profileOld || {}), id: profileOld?.id || uid(), name: form.elements.name.value.trim() || null,
+      ...(profileOld || {}), id: 'profile', name: form.elements.name.value.trim() || null,
       birth_date: form.elements.birth_date.value || null, sex: form.elements.sex.value || null,
       height_cm: Number(form.elements.height_cm.value), experience_level: form.elements.experience_level.value,
       equipment: $$("input[name='equipment']:checked", dialog).map(input => input.value),
@@ -369,7 +369,7 @@ async function saveForm(event) {
   const targetDateValue = form.elements.effective_from.value;
   const targetOld = targets.find(row => row.effective_from === targetDateValue && !row.deleted_at) || null;
   const targetRow = {
-    ...(targetOld || {}), id: targetOld?.id || uid(), effective_from: targetDateValue,
+    ...(targetOld || {}), id: `daily-target:${targetDateValue}`, effective_from: targetDateValue,
     calories: Number(form.elements.calories.value), protein_g: Number(form.elements.protein_g.value),
     carbs_g: Number(form.elements.carbs_g.value), fat_g: Number(form.elements.fat_g.value),
     water_ml: Number(form.elements.water_ml.value), sleep_minutes: Number(form.elements.sleep_minutes.value),
@@ -377,12 +377,20 @@ async function saveForm(event) {
   };
   const initialWeight = !weights.some(row => !row.deleted_at) && form.elements.initial_weight_kg ? Number(form.elements.initial_weight_kg.value) : null;
   const initialWeightRow = initialWeight ? { id: uid(), weight_kg: initialWeight, logged_at: nowMs, timestamp: nowMs, local_date: today(), note: 'Initial profile weight', ...stamp() } : null;
+  const closedGoalRow = activeGoal && !goalSame ? { ...activeGoal, id: activeGoal.id === 'goal:active' ? uid() : activeGoal.id, status: 'closed', ended_at: nowMs, updated_at: nowMs } : null;
+  const newGoalRow = !goalSame ? { id: 'goal:active', goal_type: goalType, target_weight_kg: targetWeight, target_rate_kg_per_week: targetRate, target_date: targetDate, status: 'active', started_at: nowMs, ended_at: null, created_at: nowMs, updated_at: nowMs } : null;
+  const queuedWrites = [
+    ['profile', writes.profile], ...(closedGoalRow ? [['goals', closedGoalRow]] : []), ...(newGoalRow ? [['goals', newGoalRow]] : []),
+    ['daily_targets', targetRow], ...(initialWeightRow ? [['weight_logs', initialWeightRow]] : []), ['programs', writes.program],
+    ...writes.exercises.map(item => [item._kind === 'program' ? 'programs' : 'exercises', item.row]),
+    ...writes.days.map(row => ['program_days', row]), ...writes.relations.map(row => ['program_exercises', row]),
+  ];
   const storeNames = ['profile', 'goals', 'daily_targets', 'weight_logs', 'programs', 'program_days', 'exercises', 'program_exercises'];
   await new Promise((resolve, reject) => {
     const tx = db.transaction(storeNames, 'readwrite');
     tx.objectStore('profile').put(writes.profile);
-    if (activeGoal && !goalSame) tx.objectStore('goals').put({ ...activeGoal, status: 'closed', ended_at: nowMs, updated_at: nowMs });
-    if (!goalSame) tx.objectStore('goals').put({ id: uid(), goal_type: goalType, target_weight_kg: targetWeight, target_rate_kg_per_week: targetRate, target_date: targetDate, status: 'active', started_at: nowMs, ended_at: null, created_at: nowMs, updated_at: nowMs });
+    if (closedGoalRow) tx.objectStore('goals').put(closedGoalRow);
+    if (newGoalRow) tx.objectStore('goals').put(newGoalRow);
     tx.objectStore('daily_targets').put(targetRow);
     if (initialWeightRow) tx.objectStore('weight_logs').put(initialWeightRow);
     tx.objectStore('programs').put(writes.program);
@@ -396,6 +404,7 @@ async function saveForm(event) {
     tx.onerror = () => reject(tx.error);
     tx.onabort = () => reject(tx.error || new Error('Transaction aborted'));
   });
+  for (const [storeName, row] of queuedWrites) window.azabQueueSyncWrite?.(storeName, row);
   dialog.close();
   await renderCard();
   document.dispatchEvent(new CustomEvent('azab:targets-changed'));

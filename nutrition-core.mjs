@@ -89,3 +89,13 @@ export function shouldAcceptImportedRow(incoming, current) {
   const currentTime = Number(current?.updated_at || current?.created_at || 0);
   return incomingTime > currentTime;
 }
+
+export function restoreSavedMealWithItems(meal, items, updatedAt) {
+  if (!meal?.id) throw new TypeError('A saved meal with an ID is required.');
+  return {
+    meal: { ...meal, deleted_at: null, updated_at: updatedAt },
+    items: (items || [])
+      .filter(item => item.saved_meal_id === meal.id && item.deleted_at)
+      .map(item => ({ ...item, deleted_at: null, updated_at: updatedAt })),
+  };
+}
