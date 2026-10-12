@@ -1,5 +1,6 @@
 import { FOOD_SEEDS } from './food-seeds.js';
 import { buildFoodSnapshot, effectiveTargetsForDate, macroEnergyCheck, nutritionPer100g, restoreSavedMealWithItems, scaleNutrition, sumNutrition } from './nutrition-core.mjs';
+import { DEFAULT_GEMINI_MODEL, applyMealApprovalAction, buildMealApprovalPlan, canApproveMeal, clearGeminiApiKey, portionToPer100, prepareMealDraft, readGeminiApiKey, readGeminiModel, requestSelectedAiItems, saveGeminiApiKey, saveGeminiModel, selectedAiItems, sumPortionValues } from './meal-box-core.mjs';
 
 const DB_NAME = 'azab-fitness-os';
 const DB_VERSION = 5;
@@ -55,10 +56,33 @@ const tr = key => (text[document.documentElement.lang === 'en' ? 'en' : 'ar'][ke
 const html = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 const fmt = (value, digits = 1) => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)) ? new Intl.NumberFormat(document.documentElement.lang === 'en' ? 'en-US' : 'ar-EG', { maximumFractionDigits: digits }).format(Number(value)) : '—';
 const locale = () => document.documentElement.lang === 'en' ? 'en' : 'ar';
+const mealCopy = {
+  ar: {
+    title: 'وجبة سريعة', hint: 'اكتب كل طعام والكمية بالجرام، في سطر أو بفاصلة.', inputLabel: 'الأطعمة والكميات', placeholder: 'شوفان 120 جرام، لبن 100 جرام', accepted: 'الوحدات: جرام، جم، g، gr، gram، grams', parse: 'راجع الوجبة',
+    empty: 'اكتب طعامًا واحدًا على الأقل مع كمية بالجرام.', invalidLine: 'السطر {line} مش هيتسجل: اكتب اسم الطعام وكمية صحيحة بالجرام.', choose: 'اختار طعامًا محفوظًا أو طعامًا جديدًا', newFood: 'طعام جديد',
+    method: 'اختار طريقة إدخال القيم', manual: 'أدخل القيم', ai: 'الـ AI يقدّرها', manualHint: 'اكتب القيم لهذه الكمية ({grams} جم). هتفضل قابلة للتعديل قبل الحفظ.', aiHint: 'تقدير تقريبي؛ راجع وعدّل كل قيمة قبل الحفظ.',
+    estimate: 'قدّر الأطعمة الجديدة المحددة', answer: 'جاوب على السؤال واطلب التقدير مرة تانية', question: 'سؤال للتوضيح', answerPlaceholder: 'اكتب إجابتك', waiting: 'اختار يدوي أو AI لكل طعام جديد. مش هيحصل اتصال أو حفظ قبل اختيارك.',
+    kcal: 'السعرات', protein: 'البروتين (جم)', carbs: 'الكربوهيدرات (جم)', fat: 'الدهون (جم)', total: 'مجموع الوجبة المحسوب في التطبيق', aiSavedEstimate: 'تقدير AI',
+    approve: 'أوافق واحفظ الوجبة', cancel: 'إلغاء ومسح المسودة', skipped: 'الأسطر غير الصالحة هتتجاهل، ومش هتتحفظ.', invalidValues: 'راجع كل القيم؛ لازم تكون أرقامًا صحيحة غير سالبة.',
+    saved: 'اتحفظت الوجبة والأطعمة الجديدة.', saveError: 'تعذر حفظ الوجبة. لم يتم اعتماد العملية؛ جرّب مرة أخرى.', keyCard: 'إعدادات Gemini للأطعمة فقط', keyHint: 'التقدير يرسل أسماء الأطعمة الجديدة المحددة وكمياتها فقط، وأي إجابة تكتبها لسؤال التوضيح. لا يرسل بيانات الملف أو التاريخ الصحي.',
+    keyLabel: 'مفتاح Gemini API', modelLabel: 'اسم موديل Gemini', saveSettings: 'حفظ الإعدادات على هذا الجهاز', clearKey: 'مسح المفتاح', keySaved: 'المفتاح محفوظ على هذا الجهاز فقط؛ لا يدخل في المزامنة أو النسخة الاحتياطية.', noKey: 'لم يُحفظ مفتاح على هذا الجهاز.', settingsSaved: 'اتحفظ اسم الموديل؛ المفتاح السابق لم يتغير.', keyCleared: 'تم مسح المفتاح من هذا الجهاز.', settingsError: 'تعذر حفظ الإعدادات على هذا الجهاز.', keyRequired: 'احفظ مفتاح Gemini من الإعدادات أولًا.', apiError: 'رد Gemini: ',
+  },
+  en: {
+    title: 'Quick meal box', hint: 'Enter each food and its gram amount on a line or separated by commas.', inputLabel: 'Foods and amounts', placeholder: 'oats 120 g, milk 100 g', accepted: 'Units: grams, gram, gr, g, جرام, جم', parse: 'Review meal',
+    empty: 'Enter at least one food with a gram amount.', invalidLine: 'Line {line} will be skipped: enter a food name and a valid gram amount.', choose: 'Choose a saved food or a new food', newFood: 'New food',
+    method: 'Choose how to add values', manual: 'Enter values', ai: 'Ask AI to estimate', manualHint: 'Enter totals for this amount ({grams} g). Values stay editable before saving.', aiHint: 'Estimate only; review and edit every value before saving.',
+    estimate: 'Estimate selected new foods', answer: 'Answer and request the estimate again', question: 'Clarification question', answerPlaceholder: 'Your answer', waiting: 'Choose manual or AI for every new food. No request or save happens before you choose.',
+    kcal: 'Calories', protein: 'Protein (g)', carbs: 'Carbohydrates (g)', fat: 'Fat (g)', total: 'Meal total, calculated in the app', aiSavedEstimate: 'AI estimate',
+    approve: 'Approve and save meal', cancel: 'Cancel and clear draft', skipped: 'Invalid lines will be skipped and will not be saved.', invalidValues: 'Check every value; enter valid non-negative numbers.',
+    saved: 'Meal and new foods saved.', saveError: 'The meal could not be saved. The transaction was not accepted; please try again.', keyCard: 'Food-only Gemini settings', keyHint: 'An estimate sends only the selected new food names and grams, plus any answer you enter for a clarification. Profile or health history is never sent.',
+    keyLabel: 'Gemini API key', modelLabel: 'Gemini model name', saveSettings: 'Save settings on this device', clearKey: 'Clear key', keySaved: 'Key is stored on this device only; it is not synced or included in backups.', noKey: 'No key is saved on this device.', settingsSaved: 'Model saved; any existing key was unchanged.', keyCleared: 'Key cleared from this device.', settingsError: 'Settings could not be saved on this device.', keyRequired: 'Save a Gemini API key in Settings first.', apiError: 'Gemini response: ',
+  },
+};
+const mt = key => mealCopy[locale()][key] ?? text[locale()][key] ?? key;
 let db;
 let view;
 let cache = { foods: [], logs: [], meals: [], items: [], targets: [] };
-const ui = { selectedDate: today(), search: '', filter: 'all', selectedFoodId: null, amount: '', mealType: 'breakfast', mealLabel: '', recipeDraft: [], showTrash: false };
+const ui = { selectedDate: today(), search: '', filter: 'all', selectedFoodId: null, amount: '', mealType: 'breakfast', mealLabel: '', recipeDraft: [], showTrash: false, mealText: '', mealDraft: null, mealBusy: false, mealError: '', geminiKeyDraft: '', geminiModelDraft: '', geminiSettingsStatus: '' };
 
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -173,7 +197,7 @@ function decodeMealToken(token) {
 function foodCard(food) {
   const name = localizedFood(food);
   const favorite = Boolean(food.is_favorite);
-  const estimate = food.is_estimate ? `<span class="n-estimate">${tr('estimate')}</span>` : '';
+  const estimate = food.is_estimate ? `<span class="n-estimate">${food.source === 'AI estimate' ? mt('aiSavedEstimate') : tr('estimate')}</span>` : '';
   const foodNote = locale() === 'ar' ? (food.data_note_ar || food.data_note) : (food.data_note_en || food.data_note);
   const note = foodNote ? `<small class="n-food-note">${html(foodNote)}</small>` : '';
   const summary = `${fmt(food.kcal_per_100g, 0)} kcal · P ${fmt(food.protein_g_per_100g)} · C ${fmt(food.carbs_g_per_100g)} · F ${fmt(food.fat_g_per_100g)}`;
@@ -280,6 +304,237 @@ function foodOptions() {
   return cache.foods.filter(food => !food.deleted_at).slice().sort((a, b) => localizedFood(a).localeCompare(localizedFood(b), locale()))
     .map(food => `<option value="${html(food.id)}">${html(localizedFood(food))}</option>`).join('');
 }
+function mealEntryFood(entry) {
+  if (!entry?.choice?.startsWith('food:')) return null;
+  return cache.foods.find(food => food.id === entry.choice.slice(5) && !food.deleted_at) || null;
+}
+function mealEntryPortionValues(entry) {
+  if (entry?.choice?.startsWith('food:')) {
+    const food = mealEntryFood(entry);
+    return food ? scaleNutrition(nutritionPer100g(food), entry.grams) : null;
+  }
+  if (entry?.choice !== 'new') return null;
+  const input = entry.method === 'manual' ? entry.manualValues : entry.method === 'ai' ? entry.aiValues : null;
+  if (!input || entry.question) return null;
+  try { return scaleNutrition(portionToPer100(input, entry.grams), entry.grams); }
+  catch { return null; }
+}
+function mealValuesMarkup(values, line, kind) {
+  const fields = [
+    ['kcal', 'kcal'], ['protein_g', 'protein'], ['carbs_g', 'carbs'], ['fat_g', 'fat'],
+  ];
+  return `<div class="n-meal-values">${fields.map(([field, label]) => `<label><span>${mt(label)}</span><input type="number" min="0" max="100000" step="0.1" inputmode="decimal" value="${values?.[field] ?? ''}" data-meal-value="${field}" data-meal-line="${line}" data-meal-kind="${kind}" aria-label="${mt(label)}"></label>`).join('')}</div>`;
+}
+function mealEntryMarkup(entry, index) {
+  const exact = entry.exactMatches || [];
+  const similar = entry.similarFoods || [];
+  const candidates = exact.length ? exact : similar.map(item => item.food);
+  const selectedFood = mealEntryFood(entry);
+  const needsChoice = exact.length !== 1 || similar.length > 0;
+  const choiceMarkup = needsChoice ? `<label class="n-meal-choice"><span>${mt('choose')}</span><select data-meal-field="choice" data-meal-line="${index}"><option value="" ${entry.choice ? '' : 'selected'}>${mt('choose')}</option>${candidates.map(food => `<option value="food:${html(food.id)}" ${entry.choice === `food:${food.id}` ? 'selected' : ''}>${html(localizedFood(food))}</option>`).join('')}<option value="new" ${entry.choice === 'new' ? 'selected' : ''}>${mt('newFood')}</option></select></label>` : '';
+  const name = selectedFood ? localizedFood(selectedFood) : entry.inputName;
+  const values = mealEntryPortionValues(entry);
+  let detail = '';
+  if (entry.choice === 'new') {
+    const locked = ui.mealDraft.initialAiRequested && !entry.question;
+    detail = `<fieldset class="n-meal-method" ${ui.mealBusy ? 'disabled' : ''}><legend>${mt('method')}</legend><label><input type="radio" name="meal-method-${index}" value="manual" data-meal-field="method" data-meal-line="${index}" ${entry.method === 'manual' ? 'checked' : ''} ${locked ? 'disabled' : ''}><span>${mt('manual')}</span></label><label><input type="radio" name="meal-method-${index}" value="ai" data-meal-field="method" data-meal-line="${index}" ${entry.method === 'ai' ? 'checked' : ''} ${locked ? 'disabled' : ''}><span>${mt('ai')}</span></label></fieldset>`;
+    if (entry.method === 'manual') {
+      detail += `<p class="n-muted">${mt('manualHint').replace('{grams}', fmt(entry.grams, 1))}</p>${mealValuesMarkup(entry.manualValues, index, 'manual')}`;
+    } else if (entry.method === 'ai') {
+      detail += `<p class="n-estimate-note">${mt('aiHint')}</p>`;
+      if (entry.question) {
+        detail += `<div class="n-meal-question"><strong>${mt('question')}</strong><p>${html(entry.question)}</p><label><span>${mt('answerPlaceholder')}</span><textarea rows="2" maxlength="300" data-meal-field="answer" data-meal-line="${index}">${html(entry.answer || '')}</textarea></label></div>`;
+      }
+      if (entry.aiValues) detail += mealValuesMarkup(entry.aiValues, index, 'ai');
+    }
+  }
+  const summary = values ? `<p class="n-meal-item-total">${fmt(entry.grams, 1)} ${mt('grams')} · ${fmt(values.kcal, 0)} kcal · P ${fmt(values.protein_g)} · C ${fmt(values.carbs_g)} · F ${fmt(values.fat_g)}</p>` : '';
+  return `<article class="n-meal-entry"><div class="n-meal-entry-head"><strong>${html(name)}</strong><span>${fmt(entry.grams, 1)} ${mt('grams')}</span></div>${choiceMarkup}${selectedFood ? `<p class="n-meal-item-total">${fmt(values?.kcal, 0)} kcal · P ${fmt(values?.protein_g)} · C ${fmt(values?.carbs_g)} · F ${fmt(values?.fat_g)}</p>` : ''}${detail}${!selectedFood && entry.choice !== 'new' ? `<p class="n-muted">${mt('choose')}</p>` : ''}${entry.choice === 'new' && !entry.method ? `<p class="n-muted">${mt('waiting')}</p>` : ''}${entry.choice === 'new' && entry.method === 'ai' && !entry.question && !entry.aiValues ? `<p class="n-muted">${mt('waiting')}</p>` : ''}${entry.choice === 'new' ? summary : ''}</article>`;
+}
+function renderMealBox() {
+  const draft = ui.mealDraft;
+  const entries = draft?.entries || [];
+  const ready = canApproveMeal(entries, cache.foods);
+  const values = entries.map(mealEntryPortionValues).filter(Boolean);
+  const total = sumPortionValues(values);
+  const selected = selectedAiItems(entries);
+  const questions = entries.filter(entry => entry.choice === 'new' && entry.method === 'ai' && entry.question);
+  const canAnswer = questions.length > 0 && questions.every(entry => entry.answer?.trim());
+  const parseErrors = (draft?.errors || []).map(error => `<li>${html(mt('invalidLine').replace('{line}', error.line).replace('{text}', error.raw))}</li>`).join('');
+  const detail = draft ? `<div class="n-meal-review">${parseErrors ? `<ul class="n-meal-errors">${parseErrors}</ul><p class="n-muted">${mt('skipped')}</p>` : ''}${entries.map(mealEntryMarkup).join('')}${!entries.length ? `<p class="n-muted">${mt('empty')}</p>` : ''}${ui.mealError ? `<p class="n-form-error" role="alert">${html(mealErrorMessage())}</p>` : ''}${values.length ? `<div class="n-meal-total" id="n-meal-total"><strong>${mt('total')}</strong><span>${fmt(total.kcal, 0)} kcal · P ${fmt(total.protein_g)} · C ${fmt(total.carbs_g)} · F ${fmt(total.fat_g)}</span></div>` : ''}<div class="n-meal-actions">${selected.length && !draft.initialAiRequested ? `<button type="button" class="secondary" data-n-action="estimate-meal" ${ui.mealBusy ? 'disabled' : ''}>${mt('estimate')}</button>` : ''}${questions.length ? `<button type="button" class="secondary" data-n-action="answer-meal" ${canAnswer && !ui.mealBusy ? '' : 'disabled'}>${mt('answer')}</button>` : ''}<button type="button" class="primary" data-n-action="approve-meal" ${ready && !ui.mealBusy ? '' : 'disabled'}>${mt('approve')}</button><button type="button" class="text-btn" data-n-action="cancel-meal" ${ui.mealBusy ? 'disabled' : ''}>${mt('cancel')}</button></div></div>` : '';
+  return `<article class="card n-meal-box"><div class="card-title"><div><h3>${mt('title')}</h3><p class="n-muted">${mt('hint')}</p></div></div><label class="n-meal-input-label"><span>${mt('inputLabel')}</span><textarea id="n-meal-input" rows="3" maxlength="1000" placeholder="${mt('placeholder')}">${html(ui.mealText)}</textarea></label><div class="n-meal-parse-row"><button type="button" class="secondary" data-n-action="parse-meal">${mt('parse')}</button><small>${mt('accepted')}</small></div>${detail}</article>`;
+}
+function mealErrorMessage() {
+  if (!ui.mealError || typeof ui.mealError === 'string') return ui.mealError || '';
+  return `${mt(ui.mealError.key)}${ui.mealError.detail || ''}`;
+}
+function localStorageOrNull() {
+  try { return window.localStorage; } catch { return null; }
+}
+function renderGeminiSettingsCard(force = false) {
+  const host = $('#settings');
+  if (!host) return;
+  let card = $('#n-gemini-settings', host);
+  if (!card) {
+    card = document.createElement('article');
+    card.id = 'n-gemini-settings';
+    card.className = 'card n-gemini-settings';
+    host.appendChild(card);
+  }
+  if (!force && card.dataset.locale === locale()) return;
+  const storage = localStorageOrNull();
+  const saved = Boolean(readGeminiApiKey(storage));
+  const model = ui.geminiModelDraft || readGeminiModel(storage) || DEFAULT_GEMINI_MODEL;
+  card.innerHTML = `<div class="card-title"><div><h3>${mt('keyCard')}</h3><p class="n-muted">${mt('keyHint')}</p></div></div><label><span>${mt('keyLabel')}</span><input id="n-gemini-key" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" value="${html(ui.geminiKeyDraft)}"></label><label><span>${mt('modelLabel')}</span><input id="n-gemini-model" type="text" autocomplete="off" value="${html(model)}"></label><p class="n-gemini-status" role="status">${html(ui.geminiSettingsStatus ? mt(ui.geminiSettingsStatus) : (saved ? mt('keySaved') : mt('noKey')))}</p><div class="n-gemini-actions"><button type="button" class="secondary" data-gemini-action="save">${mt('saveSettings')}</button><button type="button" class="text-btn" data-gemini-action="clear">${mt('clearKey')}</button></div>`;
+  card.dataset.locale = locale();
+}
+function installGeminiSettingsCard() {
+  const host = $('#settings');
+  if (!host || host.dataset.mealGeminiBound) return;
+  host.dataset.mealGeminiBound = 'true';
+  host.addEventListener('input', event => {
+    if (event.target.id === 'n-gemini-key') ui.geminiKeyDraft = event.target.value;
+    if (event.target.id === 'n-gemini-model') ui.geminiModelDraft = event.target.value;
+  });
+  host.addEventListener('click', event => {
+    const button = event.target.closest('[data-gemini-action]');
+    if (!button || !host.contains(button)) return;
+    const storage = localStorageOrNull();
+    try {
+      if (!storage) throw new Error('storage');
+      if (button.dataset.geminiAction === 'clear') {
+        clearGeminiApiKey(storage);
+        ui.geminiKeyDraft = '';
+        ui.geminiSettingsStatus = 'keyCleared';
+      } else {
+        saveGeminiModel(storage, $('#n-gemini-model', host)?.value || '');
+        const key = $('#n-gemini-key', host)?.value.trim() || '';
+        if (key) saveGeminiApiKey(storage, key);
+        ui.geminiKeyDraft = '';
+        ui.geminiModelDraft = '';
+        ui.geminiSettingsStatus = key ? 'keySaved' : 'settingsSaved';
+      }
+    } catch {
+      ui.geminiSettingsStatus = 'settingsError';
+    }
+    renderGeminiSettingsCard(true);
+  });
+  document.addEventListener('azab:language-changed', () => renderGeminiSettingsCard(true));
+  const observer = new MutationObserver(() => {
+    if (!$('#n-gemini-settings', host)) renderGeminiSettingsCard(true);
+  });
+  observer.observe(host, { childList: true });
+  renderGeminiSettingsCard(true);
+}
+function parseMealBox() {
+  ui.mealText = $('#n-meal-input', view)?.value || '';
+  ui.mealError = '';
+  ui.mealBusy = false;
+  const draft = prepareMealDraft(ui.mealText, cache.foods);
+  ui.mealDraft = draft;
+  if (!draft.entries.length && !draft.errors.length) ui.mealError = { key: 'empty' };
+  renderNutrition();
+}
+function entryForLine(line) {
+  return ui.mealDraft?.entries?.[Number(line)] || null;
+}
+function updateMealControls() {
+  if (!ui.mealDraft) return;
+  const approve = $('[data-n-action="approve-meal"]', view);
+  if (approve) approve.disabled = ui.mealBusy || !canApproveMeal(ui.mealDraft.entries, cache.foods);
+  const questions = ui.mealDraft.entries.filter(entry => entry.choice === 'new' && entry.method === 'ai' && entry.question);
+  const answer = $('[data-n-action="answer-meal"]', view);
+  if (answer) answer.disabled = ui.mealBusy || !questions.length || !questions.every(entry => entry.answer?.trim());
+}
+function updateMealTotal() {
+  const totalElement = $('#n-meal-total', view);
+  if (!ui.mealDraft) return;
+  const values = ui.mealDraft.entries.map(mealEntryPortionValues).filter(Boolean);
+  if (totalElement && values.length) {
+    const total = sumPortionValues(values);
+    totalElement.innerHTML = `<strong>${mt('total')}</strong><span>${fmt(total.kcal, 0)} kcal · P ${fmt(total.protein_g)} · C ${fmt(total.carbs_g)} · F ${fmt(total.fat_g)}</span>`;
+  }
+  updateMealControls();
+}
+function applyGeminiResult(result, requested) {
+  const available = new Set(requested.map((_, index) => index));
+  for (const item of result.items) {
+    const index = [...available].find(candidate => normalizeMealName(requested[candidate].inputName) === normalizeMealName(item.name) && Math.abs(requested[candidate].grams - item.grams) <= 0.01);
+    if (index === undefined) continue;
+    available.delete(index);
+    const entry = requested[index];
+    entry.aiValues = { kcal: item.kcal, protein_g: item.protein_g, carbs_g: item.carbs_g, fat_g: item.fat_g };
+    entry.question = null;
+    entry.answer = '';
+  }
+  for (const question of result.questions) {
+    const index = [...available].find(candidate => normalizeMealName(requested[candidate].inputName) === normalizeMealName(question.name) && Math.abs(requested[candidate].grams - question.grams) <= 0.01);
+    if (index === undefined) continue;
+    available.delete(index);
+    const entry = requested[index];
+    entry.aiValues = null;
+    entry.question = question.question;
+    entry.answer = '';
+  }
+}
+function normalizeMealName(value) {
+  return String(value ?? '').normalize('NFKC').trim().toLowerCase().replace(/\s+/gu, ' ');
+}
+async function requestMealEstimate(clarify = false) {
+  const entries = ui.mealDraft?.entries || [];
+  const requested = clarify
+    ? entries.filter(entry => entry.choice === 'new' && entry.method === 'ai' && entry.question && entry.answer?.trim())
+    : entries.filter(entry => entry.choice === 'new' && entry.method === 'ai');
+  if (!requested.length) { ui.mealError = { key: clarify ? 'answer' : 'waiting' }; renderNutrition(); return; }
+  const storage = localStorageOrNull();
+  const apiKey = readGeminiApiKey(storage);
+  if (!apiKey) { ui.mealError = { key: 'keyRequired' }; renderNutrition(); return; }
+  const clarifications = clarify ? requested.map(entry => ({ name: entry.inputName, grams: entry.grams, question: entry.question, answer: entry.answer })) : [];
+  ui.mealBusy = true;
+  ui.mealError = '';
+  renderNutrition();
+  try {
+    const result = await requestSelectedAiItems(requested, { apiKey, model: readGeminiModel(storage), clarifications });
+    applyGeminiResult(result, requested);
+    if (!clarify) ui.mealDraft.initialAiRequested = true;
+  } catch (error) {
+    ui.mealError = { key: 'apiError', detail: String(error?.message || 'تعذر تنفيذ الطلب. / Request failed.').split(apiKey).join('[redacted]') };
+    if (!clarify) ui.mealDraft.initialAiRequested = false;
+  } finally {
+    ui.mealBusy = false;
+    renderNutrition();
+  }
+}
+async function approveMealBox() {
+  const entries = ui.mealDraft?.entries || [];
+  if (!canApproveMeal(entries, cache.foods)) { ui.mealError = { key: 'invalidValues' }; renderNutrition(); return; }
+  let meal;
+  try { meal = getCurrentMeal(); }
+  catch { ui.mealError = { key: 'customTypeNeed' }; renderNutrition(); return; }
+  const time = now();
+  let plan;
+  try { plan = buildMealApprovalPlan({ entries, foods: cache.foods, meal, localDate: ui.selectedDate, timestamp: time, createId: uid }); }
+  catch { ui.mealError = { key: 'invalidValues' }; renderNutrition(); return; }
+  if (!plan) { ui.mealError = { key: 'invalidValues' }; renderNutrition(); return; }
+  try {
+    await applyMealApprovalAction('approve', {
+      plan,
+      write: ({ foodsToWrite, logsToWrite }) => transaction(['foods', 'food_logs'], tx => {
+        for (const food of foodsToWrite) tx.objectStore('foods').put(food);
+        for (const log of logsToWrite) tx.objectStore('food_logs').put(log);
+      }),
+    });
+  } catch {
+    ui.mealError = { key: 'saveError' };
+    renderNutrition();
+    return;
+  }
+  ui.mealText = '';
+  ui.mealDraft = null;
+  ui.mealError = '';
+  await renderNutrition();
+  notify(mt('saved'));
+}
 function renderShell(target, totals, dayLogs) {
   const custom = ui.mealType === 'custom';
   const selectedFood = cache.foods.find(food => food.id === ui.selectedFoodId && !food.deleted_at);
@@ -287,6 +542,7 @@ function renderShell(target, totals, dayLogs) {
   const filters = [['all', 'allFoods'], ['favorites', 'favorites'], ['recent', 'recent']];
   const selectedMeal = ui.mealType;
   return `<div class="section-head n-section-head"><div><p class="muted">FUEL</p><h2>${tr('title')}</h2><p class="n-muted">${tr('subtitle')}</p></div><button type="button" class="secondary" data-n-action="toggle-trash">${ui.showTrash ? tr('hideTrash') : tr('trash')}</button></div>
+    ${renderMealBox()}
     <article class="card n-date-card"><label><span>${tr('date')}</span><input id="n-date" type="date" value="${html(ui.selectedDate)}"></label><button type="button" class="secondary" data-n-action="copy-previous">${tr('copyPrevious')}</button><button type="button" class="text-btn" data-n-action="today">${tr('day')}: ${html(today()) === html(ui.selectedDate) ? tr('day') : today()}</button></article>
     ${renderTargets(target, totals)}
     <article class="card n-search-card"><div class="card-title"><h3>${tr('searchTitle')}</h3><button type="button" class="secondary" data-n-action="new-food">${tr('addCustom')}</button></div><label class="n-search-label"><span>${tr('search')}</span><input id="n-food-search" type="search" value="${html(ui.search)}" autocomplete="off" placeholder="${html(tr('search'))}"></label><div class="n-filter-row">${filters.map(([key, label]) => `<button type="button" class="n-filter ${ui.filter === key ? 'active' : ''}" data-n-action="filter" data-filter="${key}">${tr(label)}</button>`).join('')}</div>
@@ -638,6 +894,16 @@ function setField(form, name, value) { const field = form.elements.namedItem(nam
 function clickAction(button) {
   const action = button.dataset.nAction;
   const id = button.dataset.id;
+  if (action === 'parse-meal') return parseMealBox();
+  if (action === 'cancel-meal') {
+    void applyMealApprovalAction('cancel', { onCancel: () => {
+      ui.mealDraft = null; ui.mealText = ''; ui.mealError = ''; ui.mealBusy = false; renderNutrition();
+    } });
+    return;
+  }
+  if (action === 'estimate-meal') { void requestMealEstimate(false); return; }
+  if (action === 'answer-meal') { void requestMealEstimate(true); return; }
+  if (action === 'approve-meal') { void approveMealBox(); return; }
   if (action === 'select-food') {
     ui.selectedFoodId = id;
     const food = cache.foods.find(row => row.id === id);
@@ -703,11 +969,31 @@ function bindView() {
     if (event.target.id === 'n-food-search') { ui.search = event.target.value; renderFoodResults(); }
     if (event.target.id === 'n-quantity') updateQuantityPreview();
     if (event.target.id === 'n-meal-label') ui.mealLabel = event.target.value;
+    if (event.target.id === 'n-meal-input') ui.mealText = event.target.value;
+    if (event.target.dataset.mealField === 'answer') { const entry = entryForLine(event.target.dataset.mealLine); if (entry) entry.answer = event.target.value; updateMealControls(); }
+    if (event.target.dataset.mealValue) {
+      const entry = entryForLine(event.target.dataset.mealLine);
+      if (entry) {
+        const field = event.target.dataset.mealValue;
+        const target = event.target.dataset.mealKind === 'ai' ? 'aiValues' : 'manualValues';
+        entry[target] ||= {};
+        entry[target][field] = event.target.value === '' ? '' : Number(event.target.value);
+        updateMealTotal();
+      }
+    }
   });
   view.addEventListener('change', event => {
     if (event.target.id === 'n-date' && event.target.value) { ui.selectedDate = event.target.value; renderNutrition(); }
     if (event.target.id === 'n-meal-type') { toggleCustomMealInput(); }
     if (event.target.id === 'n-meal-label') ui.mealLabel = event.target.value.trim();
+    if (event.target.dataset.mealField === 'choice') {
+      const entry = entryForLine(event.target.dataset.mealLine);
+      if (entry) { entry.choice = event.target.value || null; entry.method = null; entry.manualValues = null; entry.aiValues = null; entry.question = null; entry.answer = ''; renderNutrition(); }
+    }
+    if (event.target.dataset.mealField === 'method') {
+      const entry = entryForLine(event.target.dataset.mealLine);
+      if (entry) { entry.method = event.target.value; entry.manualValues = null; entry.aiValues = null; entry.question = null; entry.answer = ''; renderNutrition(); }
+    }
   });
 }
 
@@ -719,6 +1005,7 @@ export async function initNutrition() {
   bindView();
   document.addEventListener('azab:language-changed', () => renderNutrition());
   document.addEventListener('azab:targets-changed', () => renderNutrition());
+  installGeminiSettingsCard();
   window.azabRenderNutrition = renderNutrition;
   await renderNutrition();
 }
