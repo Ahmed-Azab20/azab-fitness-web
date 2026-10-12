@@ -43,11 +43,12 @@ const copy = {
     singletonLine: '{store} [{slot}] · local IDs: {localIds} · cloud IDs: {remoteIds} · winner: {winner}',
     winnerLocal: 'local', winnerRemote: 'cloud',
     mergeYes: 'Merge and sync', mergeNo: 'Cancel',
-    redirectNoUser: 'Google redirect returned without a signed-in user. The mobile redirect flow was not changed; report this result before retrying.',
+    redirectNoUser: 'A pending Google redirect returned without a signed-in user. New sign-in attempts use the popup; no redirect fallback was attempted.',
     authDomain: 'Google sign-in rejected this domain (auth/unauthorized-domain). Sync stopped; check the configured Firebase authorized domains.',
     providerOff: 'Google sign-in is not enabled for this Firebase project (auth/operation-not-allowed). Sync stopped.',
     permission: 'Firestore denied access (permission-denied). Sync stopped; check the existing per-user rules.',
-    popupBlocked: 'The browser blocked the sign-in popup. Allow popups and try again.',
+    popupBlocked: 'The browser blocked the sign-in popup (auth/popup-blocked). Allow popups and try again; sign-in will not switch to redirect.',
+    popupClosed: 'The sign-in popup was closed or cancelled. Try again if you still want to sign in.',
     offlineStart: 'You are offline. Your records remain local; reconnect and tap Sync now.',
     generic: 'The operation stopped', noUser: 'No signed-in Google user was returned.',
     records: 'Records merged: {uploaded} uploaded, {downloaded} downloaded.',
@@ -72,11 +73,12 @@ const copy = {
     singletonLine: '{store} [{slot}] · المعرّفات المحلية: {localIds} · السحابية: {remoteIds} · الفائز: {winner}',
     winnerLocal: 'محلي', winnerRemote: 'سحابي',
     mergeYes: 'دمج ومزامنة', mergeNo: 'إلغاء',
-    redirectNoUser: 'اكتملت إعادة التوجيه من جوجل دون إرجاع مستخدم مسجّل الدخول. لم يتم تغيير طريقة إعادة التوجيه؛ أبلغ عن هذه النتيجة قبل المحاولة مرة أخرى.',
+    redirectNoUser: 'اكتملت إعادة توجيه جوجل معلّقة دون إرجاع مستخدم مسجّل الدخول. تسجيل الدخول الجديد يستخدم النافذة المنبثقة، ولن يتم التحويل تلقائياً إلى إعادة التوجيه.',
     authDomain: 'رفض تسجيل الدخول نطاق هذا الموقع (auth/unauthorized-domain). توقفت المزامنة؛ راجع النطاقات المسموح بها في Firebase.',
     providerOff: 'تسجيل الدخول بجوجل غير مفعّل لهذا المشروع (auth/operation-not-allowed). توقفت المزامنة.',
     permission: 'رفض Firestore الوصول (permission-denied). توقفت المزامنة؛ راجع القواعد الحالية لكل مستخدم.',
-    popupBlocked: 'منع المتصفح نافذة تسجيل الدخول. اسمح بالنوافذ المنبثقة ثم أعد المحاولة.',
+    popupBlocked: 'منع المتصفح نافذة تسجيل الدخول (auth/popup-blocked). اسمح بالنوافذ المنبثقة ثم أعد المحاولة؛ لن يتم التحويل إلى إعادة التوجيه.',
+    popupClosed: 'أُغلقت نافذة تسجيل الدخول أو أُلغي الطلب. أعد المحاولة إذا كنت لا تزال تريد تسجيل الدخول.',
     offlineStart: 'أنت غير متصل. سجلاتك ما زالت محلية؛ أعد الاتصال واضغط «مزامنة الآن».',
     generic: 'تم إيقاف العملية', noUser: 'لم يتم إرجاع مستخدم جوجل مسجّل الدخول.',
     records: 'السجلات التي تمت مزامنتها: {uploaded} رُفعت و{downloaded} نُزّلت.',
@@ -260,10 +262,11 @@ function friendlyError(error) {
   if (code.includes('operation-not-allowed')) return t('providerOff');
   if (code.includes('permission-denied')) return t('permission');
   if (code.includes('popup-blocked')) return t('popupBlocked');
+  if (code.includes('popup-closed-by-user') || code.includes('cancelled-popup-request')) return t('popupClosed');
   return `${t('generic')} (${code})`;
 }
-function isMobile() {
-  return Boolean(navigator.userAgentData?.mobile) || /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
+export function signInWithPopupOnly(authApi, auth, provider) {
+  return authApi.signInWithPopup(auth, provider);
 }
 
 function mergeDetails(snapshot, user) {
@@ -370,21 +373,12 @@ async function activateUser(user) {
   await syncUserData(user);
 }
 
-async function beginRedirect(auth, provider, authApi) {
-  await writeLocalSetting(REDIRECT_PENDING_KEY, '1');
-  try {
-    await authApi.signInWithRedirect(auth, provider);
-  } catch (error) {
-    await writeLocalSetting(REDIRECT_PENDING_KEY, null);
-    throw error;
-  }
-}
-
 async function signIn() {
   if (signInBusy) return;
   signInBusy = true;
   setStatus('signingIn');
   try {
+    await writeLocalSetting(REDIRECT_PENDING_KEY, null);
     const active = await ensureFirebase();
     if (active.auth.currentUser) {
       await activateUser(active.auth.currentUser);
@@ -392,20 +386,8 @@ async function signIn() {
     }
     const provider = new active.authApi.GoogleAuthProvider();
     active.auth.languageCode = document.documentElement.lang === 'en' ? 'en' : 'ar';
-    if (isMobile()) {
-      await beginRedirect(active.auth, provider, active.authApi);
-      return;
-    }
-    try {
-      const result = await active.authApi.signInWithPopup(active.auth, provider);
-      await activateUser(result.user || active.auth.currentUser);
-    } catch (error) {
-      if (localErrorCode(error).includes('popup-blocked')) {
-        await beginRedirect(active.auth, provider, active.authApi);
-        return;
-      }
-      throw error;
-    }
+    const result = await signInWithPopupOnly(active.authApi, active.auth, provider);
+    await activateUser(result.user || active.auth.currentUser);
   } catch (error) {
     setStatus('error', { detail: friendlyError(error) });
   } finally {
