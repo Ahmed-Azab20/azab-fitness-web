@@ -3,12 +3,16 @@ import {
   DB_VERSION,
   REDIRECT_PENDING_KEY,
   SYNC_STORES,
+  applyLiveSyncStoreSnapshot,
   applySyncSnapshot,
   chunkFirestoreWrites,
   createSyncQueue,
   flushQueuedSync,
   inspectSyncData,
   needsFirstMergeConfirmation,
+  observeAuthState,
+  setDeviceAuthPersistence,
+  synchronizeAll,
 } from './phase6-core.mjs';
 
 export const FIREBASE_SDK_VERSION = '12.19.0';
@@ -25,9 +29,9 @@ const LAST_SYNC_PREFIX = 'azab-firebase-last-sync:';
 const copy = {
   en: {
     title: 'Settings', subtitle: 'Optional cloud sync', panelTitle: 'Firebase sync',
-    intro: 'Your data stays on this device unless you sign in with Google. Firebase is an opt-in sync mirror; it never blocks offline use.',
+    intro: 'Your data stays on this device unless you sign in with Google. After your first sign-in on this browser, the app remembers the session and syncs automatically on startup and when records change. Each new device/browser needs its own initial sign-in; offline use stays local.',
     tab: 'Settings', signIn: 'Sign in with Google', signOut: 'Sign out', syncNow: 'Sync now',
-    signedOut: 'Signed out — no data is being uploaded.', signingIn: 'Connecting to Google…',
+    signedOut: 'Signed out — no data is being uploaded.', restoringAuth: 'Restoring your Google session…', signingIn: 'Connecting to Google…',
     syncing: 'Syncing your records…', synced: 'Synced · {time}',
     offline: 'Offline — local changes are saved and will sync when you reconnect.',
     error: 'Sync error: {detail}', mergeCancelled: 'Merge cancelled. No records were changed.',
@@ -49,15 +53,15 @@ const copy = {
     permission: 'Firestore denied access (permission-denied). Sync stopped; check the existing per-user rules.',
     popupBlocked: 'The browser blocked the sign-in popup (auth/popup-blocked). Allow popups and try again; sign-in will not switch to redirect.',
     popupClosed: 'The sign-in popup was closed or cancelled. Try again if you still want to sign in.',
-    offlineStart: 'You are offline. Your records remain local; reconnect and tap Sync now.',
+    offlineStart: 'You are offline. Your records remain local and sync when you reconnect.',
     generic: 'The operation stopped', noUser: 'No signed-in Google user was returned.',
     records: 'Records merged: {uploaded} uploaded, {downloaded} downloaded.',
   },
   ar: {
     title: 'الإعدادات', subtitle: 'مزامنة سحابية اختيارية', panelTitle: 'مزامنة Firebase',
-    intro: 'بياناتك تظل على هذا الجهاز إلا إذا سجلت الدخول بجوجل. Firebase نسخة مزامنة اختيارية، ولا تمنع الاستخدام بدون إنترنت.',
+    intro: 'تظل بياناتك على هذا الجهاز إلا إذا سجلت الدخول بجوجل. بعد أول تسجيل دخول على هذا المتصفح، يتذكر التطبيق الجلسة ويزامن تلقائياً عند الفتح وعند تغيير السجلات. كل جهاز أو متصفح جديد يحتاج تسجيل دخول أول مرة؛ والاستخدام بدون إنترنت يظل محلياً.',
     tab: 'الإعدادات', signIn: 'تسجيل الدخول بجوجل', signOut: 'تسجيل الخروج', syncNow: 'مزامنة الآن',
-    signedOut: 'لم يتم تسجيل الدخول — لا يتم رفع أي بيانات.', signingIn: 'جاري الاتصال بجوجل…',
+    signedOut: 'لم يتم تسجيل الدخول — لا يتم رفع أي بيانات.', restoringAuth: 'جاري استعادة جلسة جوجل…', signingIn: 'جاري الاتصال بجوجل…',
     syncing: 'جاري مزامنة سجلاتك…', synced: 'تمت المزامنة · {time}',
     offline: 'أنت غير متصل — تغييراتك محفوظة محلياً وستتم مزامنتها عند عودة الاتصال.',
     error: 'خطأ في المزامنة: {detail}', mergeCancelled: 'تم إلغاء الدمج. لم يتم تغيير أي سجل.',
@@ -79,7 +83,7 @@ const copy = {
     permission: 'رفض Firestore الوصول (permission-denied). توقفت المزامنة؛ راجع القواعد الحالية لكل مستخدم.',
     popupBlocked: 'منع المتصفح نافذة تسجيل الدخول (auth/popup-blocked). اسمح بالنوافذ المنبثقة ثم أعد المحاولة؛ لن يتم التحويل إلى إعادة التوجيه.',
     popupClosed: 'أُغلقت نافذة تسجيل الدخول أو أُلغي الطلب. أعد المحاولة إذا كنت لا تزال تريد تسجيل الدخول.',
-    offlineStart: 'أنت غير متصل. سجلاتك ما زالت محلية؛ أعد الاتصال واضغط «مزامنة الآن».',
+    offlineStart: 'أنت غير متصل. سجلاتك ما زالت محلية وستتم مزامنتها عند عودة الاتصال.',
     generic: 'تم إيقاف العملية', noUser: 'لم يتم إرجاع مستخدم جوجل مسجّل الدخول.',
     records: 'السجلات التي تمت مزامنتها: {uploaded} رُفعت و{downloaded} نُزّلت.',
   },
@@ -114,6 +118,11 @@ let authUnsubscribe = null;
 let allowSync = false;
 let syncPromise = null;
 let signInBusy = false;
+let authInitialized = false;
+let syncRequested = false;
+let syncTimer = null;
+let liveUnsubscribes = [];
+let liveUid = null;
 let statusState = { kind: 'signedOut' };
 let root;
 
@@ -136,6 +145,7 @@ function formattedTime(value) {
   return new Intl.DateTimeFormat(document.documentElement.lang === 'en' ? 'en-US' : 'ar-EG', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
 }
 function statusText() {
+  if (statusState.kind === 'restoringAuth') return t('restoringAuth');
   if (statusState.kind === 'signingIn') return t('signingIn');
   if (statusState.kind === 'syncing') return t('syncing');
   if (statusState.kind === 'offline') return t('offline');
@@ -163,9 +173,13 @@ function renderSettings() {
   if (intro) intro.textContent = t('intro');
   if (status) status.textContent = statusText();
   if (photos) photos.textContent = t('photos');
-  if (signIn) { signIn.textContent = t('signIn'); signIn.hidden = Boolean(currentUser); }
-  if (signOut) { signOut.textContent = t('signOut'); signOut.hidden = !currentUser; }
-  if (syncNow) { syncNow.textContent = t('syncNow'); syncNow.hidden = !currentUser; }
+  if (signIn) {
+    signIn.textContent = t('signIn');
+    signIn.hidden = Boolean(currentUser);
+    signIn.disabled = statusState.kind === 'restoringAuth' || statusState.kind === 'signingIn';
+  }
+  if (signOut) { signOut.textContent = t('signOut'); signOut.hidden = !currentUser || !authInitialized; }
+  if (syncNow) { syncNow.textContent = t('syncNow'); syncNow.hidden = !currentUser || !authInitialized || !allowSync; }
   if (settingsTab) settingsTab.textContent = copy[lang].tab;
   if (status) status.dataset.state = statusState.kind;
   root.dir = lang === 'ar' ? 'rtl' : 'ltr';
@@ -218,6 +232,7 @@ async function loadFirebase() {
   ]);
   const app = appApi.getApps().find(item => item.name === '[DEFAULT]') || appApi.initializeApp(FIREBASE_CONFIG);
   const auth = authApi.getAuth(app);
+  await setDeviceAuthPersistence(authApi, auth);
   const firestore = firestoreApi.getFirestore(app);
   const local = localAdapter;
   const remote = {
@@ -235,14 +250,33 @@ async function loadFirebase() {
         await batch.commit();
       }
     },
+    listen(uid, storeName, onRows, onError) {
+      const reference = firestoreApi.collection(firestore, 'users', uid, storeName);
+      return firestoreApi.onSnapshot(reference,
+        snapshot => onRows(snapshot.docs.map(item => ({ ...item.data(), id: item.id }))),
+        onError);
+    },
   };
-  runtime = { app, auth, firestore, appApi, authApi, firestoreApi, local, remote };
+  runtime = { app, auth, firestore, appApi, authApi, firestoreApi, local, remote, authStateReady: null };
   if (!authUnsubscribe) {
-    authUnsubscribe = authApi.onAuthStateChanged(auth, user => {
+    const observer = observeAuthState(authApi, auth, user => {
+      const previousUid = currentUser?.uid || null;
       currentUser = user || null;
       renderSettings();
-      if (!user && !signInBusy) setStatus('signedOut');
+      if (!user) {
+        allowSync = false;
+        stopRealtimeSync();
+        if (!signInBusy && authInitialized) setStatus('signedOut');
+        return;
+      }
+      if (previousUid && previousUid !== user.uid) {
+        allowSync = false;
+        stopRealtimeSync();
+      }
+      if (authInitialized && !signInBusy && previousUid !== user.uid) void activateUser(user);
     }, error => setStatus('error', { detail: friendlyError(error) }));
+    authUnsubscribe = observer.unsubscribe;
+    runtime.authStateReady = observer.ready;
   }
   return runtime;
 }
@@ -254,6 +288,93 @@ function ensureFirebase() {
     });
   }
   return runtimePromise;
+}
+function stopRealtimeSync() {
+  for (const unsubscribe of liveUnsubscribes.splice(0)) {
+    try { unsubscribe(); } catch { /* A stopped listener is already inactive. */ }
+  }
+  liveUid = null;
+}
+function haltSyncOnPermissionDenied(error) {
+  if (!localErrorCode(error).includes('permission-denied')) return;
+  allowSync = false;
+  syncRequested = false;
+  if (syncTimer) clearTimeout(syncTimer);
+  syncTimer = null;
+  stopRealtimeSync();
+}
+function startRealtimeSync(user) {
+  if (!user?.uid || !runtime?.remote?.listen || liveUid === user.uid) return;
+  stopRealtimeSync();
+  liveUid = user.uid;
+  for (const storeName of SYNC_STORES) {
+    let active = true;
+    let pending = Promise.resolve();
+    try {
+      const unsubscribe = runtime.remote.listen(user.uid, storeName, remoteRows => {
+        pending = pending.then(async () => {
+          if (!active || currentUser?.uid !== user.uid || !allowSync) return;
+          const totals = await applyLiveSyncStoreSnapshot({
+            uid: user.uid, storeName, local: runtime.local, remote: runtime.remote, remoteRows,
+          });
+          if (totals.downloaded > 0) {
+            window.dispatchEvent(new CustomEvent('azab:remote-records-applied', { detail: { storeName, downloaded: totals.downloaded } }));
+          }
+        }).catch(error => {
+          if (active && currentUser?.uid === user.uid) {
+            haltSyncOnPermissionDenied(error);
+            setStatus('error', { detail: friendlyError(error) });
+          }
+        });
+      }, error => {
+        if (active && currentUser?.uid === user.uid) {
+          haltSyncOnPermissionDenied(error);
+          setStatus('error', { detail: friendlyError(error) });
+        }
+      });
+      liveUnsubscribes.push(() => { active = false; unsubscribe?.(); });
+    } catch (error) {
+      active = false;
+      haltSyncOnPermissionDenied(error);
+      setStatus('error', { detail: friendlyError(error) });
+    }
+  }
+}
+function beginSync(task) {
+  if (syncPromise) { syncRequested = true; return syncPromise; }
+  let succeeded = false;
+  syncPromise = Promise.resolve().then(task).then(result => {
+    succeeded = Boolean(result);
+    return succeeded;
+  }).catch(error => {
+    haltSyncOnPermissionDenied(error);
+    setStatus('error', { detail: friendlyError(error) });
+    return false;
+  }).finally(() => {
+    syncPromise = null;
+    const runAgain = syncRequested && succeeded;
+    syncRequested = false;
+    if (runAgain) setTimeout(requestQueuedSync, 0);
+  });
+  return syncPromise;
+}
+function requestQueuedSync() {
+  if (!currentUser?.uid || !allowSync || !navigator.onLine || !queue?.count()) return;
+  if (syncPromise) { syncRequested = true; return; }
+  if (syncTimer) clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => {
+    syncTimer = null;
+    const user = currentUser;
+    if (!user?.uid || !allowSync || !navigator.onLine) return;
+    void beginSync(async () => {
+      if (!queue.count()) return true;
+      setStatus('syncing');
+      const totals = await flushQueuedSync({ uid: user.uid, local: runtime.local, remote: runtime.remote, queue, stores: SYNC_STORES });
+      if (currentUser?.uid !== user.uid || !allowSync) return false;
+      setStatus('synced', { time: Date.now(), totals });
+      return true;
+    });
+  }, 120);
 }
 function localErrorCode(error) { return String(error?.code || 'unknown').toLowerCase(); }
 function friendlyError(error) {
@@ -331,10 +452,9 @@ function confirmMerge(snapshot, user) {
 }
 
 async function syncUserData(user) {
-  if (!user?.uid) return;
-  if (syncPromise) return syncPromise;
-  syncPromise = (async () => {
-    if (!navigator.onLine) { setStatus('offline'); return; }
+  if (!user?.uid) return false;
+  return beginSync(async () => {
+    if (!navigator.onLine) { setStatus('offline'); return false; }
     setStatus('syncing');
     const queuedAtStart = queue.list();
     const firstSyncKey = `${FIRST_SYNC_PREFIX}${user.uid}`;
@@ -345,32 +465,35 @@ async function syncUserData(user) {
         uid: user.uid, local: runtime.local, remote: runtime.remote, stores: SYNC_STORES,
         backfilledRows: backfillMarker?.value?.rows || [],
       });
+      if (currentUser?.uid !== user.uid || !allowSync) return false;
       if (needsFirstMergeConfirmation(snapshot) && !(await confirmMerge(snapshot, user))) {
         setStatus('mergeCancelled');
-        return;
+        return false;
       }
       totals = await applySyncSnapshot({ snapshot, uid: user.uid, local: runtime.local, remote: runtime.remote, stores: SYNC_STORES });
       queue.clearCovered(queuedAtStart);
       if (backfillMarker) await writeLocalSetting(BACKFILL_SETTING_KEY, { ...backfillMarker.value, rows: [] });
       safeSet(firstSyncKey, '1');
     } else {
-      totals = await flushQueuedSync({ uid: user.uid, local: runtime.local, remote: runtime.remote, queue, stores: SYNC_STORES });
+      totals = await synchronizeAll({ uid: user.uid, local: runtime.local, remote: runtime.remote, stores: SYNC_STORES });
+      queue.clearCovered(queuedAtStart);
     }
+    if (currentUser?.uid !== user.uid || !allowSync) return false;
     const syncedAt = Date.now();
     safeSet(`${LAST_SYNC_PREFIX}${user.uid}`, String(syncedAt));
     setStatus('synced', { time: syncedAt, totals });
-  })().catch(error => {
-    setStatus('error', { detail: friendlyError(error) });
-  }).finally(() => { syncPromise = null; });
-  return syncPromise;
+    return true;
+  });
 }
 
 async function activateUser(user) {
-  if (!user?.uid) { setStatus('error', { detail: t('noUser') }); return; }
+  if (!user?.uid) { setStatus('error', { detail: t('noUser') }); return false; }
   currentUser = user;
   allowSync = true;
   renderSettings();
-  await syncUserData(user);
+  const synced = await syncUserData(user);
+  if (synced && currentUser?.uid === user.uid && allowSync) startRealtimeSync(user);
+  return synced;
 }
 
 async function signIn() {
@@ -380,8 +503,11 @@ async function signIn() {
   try {
     await writeLocalSetting(REDIRECT_PENDING_KEY, null);
     const active = await ensureFirebase();
-    if (active.auth.currentUser) {
-      await activateUser(active.auth.currentUser);
+    await active.authStateReady;
+    authInitialized = true;
+    const restoredUser = active.auth.currentUser || currentUser;
+    if (restoredUser) {
+      await activateUser(restoredUser);
       return;
     }
     const provider = new active.authApi.GoogleAuthProvider();
@@ -404,6 +530,7 @@ async function handlePendingRedirect() {
     signInBusy = true;
     setStatus('signingIn');
     const active = await ensureFirebase();
+    await active.authStateReady;
     const result = await active.authApi.getRedirectResult(active.auth);
     await writeLocalSetting(REDIRECT_PENDING_KEY, null);
     const user = result?.user || active.auth.currentUser;
@@ -426,9 +553,27 @@ async function signOut() {
     if (!runtime) return;
     await runtime.authApi.signOut(runtime.auth);
     allowSync = false;
+    syncRequested = false;
+    if (syncTimer) clearTimeout(syncTimer);
+    syncTimer = null;
+    stopRealtimeSync();
     currentUser = null;
     setStatus('signedOut');
   } catch (error) {
+    setStatus('error', { detail: friendlyError(error) });
+  }
+}
+
+async function restoreAuthAtStartup() {
+  setStatus('restoringAuth');
+  try {
+    const active = await ensureFirebase();
+    const user = await active.authStateReady;
+    authInitialized = true;
+    if (user) await activateUser(user);
+    else setStatus('signedOut');
+  } catch (error) {
+    if (!runtime) authInitialized = false;
     setStatus('error', { detail: friendlyError(error) });
   }
 }
@@ -441,7 +586,10 @@ export async function initPhase6(database) {
       put: (storeName, row) => putLocal(storeName, row),
     };
     queue = createSyncQueue(queueStorage());
-    window.azabQueueSyncWrite = (storeName, row) => queue?.enqueue(storeName, row);
+    window.azabQueueSyncWrite = (storeName, row) => {
+      queue?.enqueue(storeName, row);
+      requestQueuedSync();
+    };
     root = byId('settings');
     if (!root) return;
     byId('p6SignIn')?.addEventListener('click', signIn);
@@ -454,13 +602,16 @@ export async function initPhase6(database) {
       void readLocalSetting(REDIRECT_PENDING_KEY).then(flag => {
         if (flag?.value === '1') void handlePendingRedirect();
         else if (currentUser && allowSync) void syncUserData(currentUser);
+        else if (!authInitialized) void restoreAuthAtStartup();
       }).catch(error => setStatus('error', { detail: friendlyError(error) }));
     });
     window.azabRenderPhase6Settings = renderSettings;
     window.azabPhase6AfterLoad = () => { void handlePendingRedirect(); };
+    setStatus('restoringAuth');
     renderSettings();
+    void restoreAuthAtStartup();
   } catch (error) {
-    // Firebase is intentionally absent from startup; local app use stays available.
+    // Firebase startup is asynchronous; local app use stays available if it is unavailable.
     const status = byId('p6Status');
     if (status) status.textContent = `${t('generic')} (${localErrorCode(error)})`;
   }

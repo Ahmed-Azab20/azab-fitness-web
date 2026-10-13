@@ -1,4 +1,4 @@
-const CACHE = 'azab-fitness-v19';
+const CACHE = 'azab-fitness-v20';
 const FILES = [
   './', './index.html', './styles.css', './app.js',
   './phase1.js', './phase1.css', './nutrition.js', './nutrition.css',

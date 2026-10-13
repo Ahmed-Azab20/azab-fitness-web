@@ -16,6 +16,38 @@ export const MAX_FIRESTORE_BATCH_WRITES = 500;
 // Conservative UTF-8 JSON ceiling; leaves room below Firestore's 1 MiB document limit.
 export const MAX_FIRESTORE_DOCUMENT_BYTES = 900 * 1024;
 
+export function setDeviceAuthPersistence(authApi, auth) {
+  if (typeof authApi?.setPersistence !== 'function' || !authApi.browserLocalPersistence) {
+    throw new TypeError('Firebase browser-local persistence is unavailable.');
+  }
+  return authApi.setPersistence(auth, authApi.browserLocalPersistence);
+}
+
+export function observeAuthState(authApi, auth, onChange = () => {}, onError = () => {}) {
+  let resolveReady;
+  let rejectReady;
+  let readySettled = false;
+  let unsubscribe = null;
+  let stopAfterSubscribe = false;
+  const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+  const stop = () => {
+    if (unsubscribe) unsubscribe();
+    else stopAfterSubscribe = true;
+  };
+  const handleError = error => {
+    if (!readySettled) { readySettled = true; rejectReady(error); }
+    onError(error);
+  };
+  const handleUser = user => {
+    const current = user || null;
+    if (!readySettled) { readySettled = true; resolveReady(current); }
+    try { onChange(current); } catch (error) { onError(error); }
+  };
+  unsubscribe = authApi.onAuthStateChanged(auth, handleUser, handleError);
+  if (stopAfterSubscribe) unsubscribe?.();
+  return { ready, unsubscribe: stop };
+}
+
 const storeSet = new Set(SYNC_STORES);
 const excludedSettingKeys = new Set(EXCLUDED_SETTING_KEYS);
 const queueKey = item => `${item.storeName}\u0000${item.recordId}`;
@@ -263,7 +295,7 @@ export async function inspectSyncData({ uid, local, remote, stores = SYNC_STORES
   };
 }
 
-export async function applySyncSnapshot({ snapshot, uid = snapshot?.uid, local, remote, stores = SYNC_STORES, now = () => Date.now() }) {
+export async function applySyncSnapshot({ snapshot, uid = snapshot?.uid, local, remote, stores = SYNC_STORES, now = () => Date.now(), pushEqualTimestampLocal = true }) {
   if (!snapshot || snapshot.uid !== uid) throw new Error('Sync snapshot user mismatch');
   const totals = { uploaded: 0, downloaded: 0, localWins: 0, remoteWins: 0, unchanged: 0, softDeleted: 0 };
   const remotePending = new Map();
@@ -314,7 +346,10 @@ export async function applySyncSnapshot({ snapshot, uid = snapshot?.uid, local, 
         && sameRecord(slot.local[0], slot.remote[0])) totals.unchanged++;
       await putLocalIfChanged(storeName, winningRow, localRows);
       const remoteCanonical = remoteRows.find(row => row.id === slot.canonicalId);
-      if (!remoteCanonical || !sameRecord(toFirestoreRecord(remoteCanonical), toFirestoreRecord(winningRow))) {
+      const equalTimeConflict = slot.local.some(localRow => slot.remote.some(remoteRow =>
+        recordTime(localRow) === recordTime(remoteRow) && !sameRecord(localRow, remoteRow)));
+      if ((!remoteCanonical || !sameRecord(toFirestoreRecord(remoteCanonical), toFirestoreRecord(winningRow)))
+        && !(equalTimeConflict && !pushEqualTimestampLocal)) {
         queueRemote(storeName, slot.canonicalId, winningRow);
       }
       for (const [id, row] of tombstones) {
@@ -346,8 +381,9 @@ export async function applySyncSnapshot({ snapshot, uid = snapshot?.uid, local, 
       if (!localRow || !remoteRow) continue;
       if (recordTime(localRow) >= recordTime(remoteRow)) {
         totals.localWins++;
-        if (sameRecord(toFirestoreRecord(localRow), toFirestoreRecord(remoteRow))) totals.unchanged++;
-        else queueRemote(storeName, id, localRow);
+        const same = sameRecord(toFirestoreRecord(localRow), toFirestoreRecord(remoteRow));
+        if (same) totals.unchanged++;
+        else if (!(recordTime(localRow) === recordTime(remoteRow) && !pushEqualTimestampLocal)) queueRemote(storeName, id, localRow);
       } else {
         totals.remoteWins++;
         if (sameRecord(localRow, fromFirestoreRecord(remoteRow, id))) totals.unchanged++;
@@ -373,7 +409,28 @@ export async function synchronizeAll({ uid, local, remote, stores = SYNC_STORES 
 
 export async function flushQueuedSync({ uid, local, remote, queue, stores = SYNC_STORES }) {
   const queuedAtStart = queue.list();
-  const result = await synchronizeAll({ uid, local, remote, stores });
+  if (!queuedAtStart.length) return { uploaded: 0, downloaded: 0, localWins: 0, remoteWins: 0, unchanged: 0, softDeleted: 0, flushed: 0 };
+  const queuedStores = [...new Set(queuedAtStart.map(item => item.storeName).filter(name => stores.includes(name)))];
+  if (!queuedStores.length) {
+    queue.clearCovered(queuedAtStart);
+    return { uploaded: 0, downloaded: 0, localWins: 0, remoteWins: 0, unchanged: 0, softDeleted: 0, flushed: queuedAtStart.length };
+  }
+  const snapshot = await inspectSyncData({ uid, local, remote, stores: queuedStores });
+  const result = await applySyncSnapshot({ snapshot, uid, local, remote, stores: queuedStores });
   queue.clearCovered(queuedAtStart);
   return { ...result, flushed: queuedAtStart.length };
+}
+
+export async function applyLiveSyncStoreSnapshot({ uid, storeName, local, remote, remoteRows }) {
+  if (!storeSet.has(storeName)) throw new Error(`Unsupported sync store: ${storeName}`);
+  const [localRows] = await Promise.all([local.list(storeName)]);
+  const normalizedRemote = (remoteRows || [])
+    .map(row => fromFirestoreRecord(row, row.id))
+    .filter(row => isSyncableRecord(storeName, row));
+  const snapshot = { uid, stores: { [storeName]: { local: localRows, remote: normalizedRemote } } };
+  return applySyncSnapshot({
+    snapshot, uid, local, remote, stores: [storeName], pushEqualTimestampLocal: false,
+    // Keep equal-time singleton conflict tombstones deterministic across repeated snapshots.
+    now: () => 0,
+  });
 }
