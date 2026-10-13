@@ -1,6 +1,9 @@
 import { buildFoodSnapshot } from './nutrition-core.mjs';
 
 export const DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash';
+export const GEMINI_REQUEST_TIMEOUT_MS = 30_000;
+export const MEAL_METHOD_REQUIRED_MESSAGE = 'اختار طريقة إدخال القيم لكل طعام جديد قبل الحفظ. / Choose a value method for every new food before saving.';
+export const GEMINI_KEY_REQUIRED_MESSAGE = 'احفظ مفتاح Gemini من الإعدادات أولًا. / Save a Gemini API key in Settings first.';
 export const GEMINI_API_KEY_STORAGE_KEY = 'azab-gemini-api-key';
 export const GEMINI_MODEL_STORAGE_KEY = 'azab-gemini-model';
 export const GEMINI_JSON_SCHEMA = {
@@ -142,6 +145,39 @@ export function matchMealItems(parsedItems, foods, limit = 3) {
 export function prepareMealDraft(input, foods) {
   const parsed = parseMealText(input);
   return { entries: matchMealItems(parsed.items, foods), errors: parsed.errors, initialAiRequested: false };
+}
+
+export function setMealEntryChoice(entry, choice) {
+  if (!entry) return entry;
+  entry.choice = choice || null;
+  entry.method = null;
+  entry.manualValues = null;
+  entry.aiValues = null;
+  entry.question = null;
+  entry.answer = '';
+  return entry;
+}
+
+export function setMealEntryMethod(entry, method) {
+  if (!entry) return entry;
+  entry.method = ['manual', 'ai'].includes(method) ? method : null;
+  entry.manualValues = null;
+  entry.aiValues = null;
+  entry.question = null;
+  entry.answer = '';
+  return entry;
+}
+
+export function mealEntryControlState(entry) {
+  return { choice: entry?.choice || '', method: ['manual', 'ai'].includes(entry?.method) ? entry.method : '' };
+}
+
+export function mealEntriesMissingMethod(entries) {
+  return (entries || []).filter(entry => entry?.choice === 'new' && !['manual', 'ai'].includes(entry.method));
+}
+
+export function mealEstimateStatus(isBusy) {
+  return isBusy ? 'جاري التقدير… / Estimating…' : '';
 }
 
 export function portionToPer100(values, grams) {
@@ -343,24 +379,45 @@ function responseText(response) {
   return (response?.candidates?.[0]?.content?.parts || []).map(part => typeof part.text === 'string' ? part.text : '').join('').trim();
 }
 
-export async function requestGeminiEstimates({ apiKey, model, items, clarifications = [], fetchImpl = globalThis.fetch }) {
+export async function requestGeminiEstimates({ apiKey, model, items, clarifications = [], fetchImpl = globalThis.fetch, timeoutMs = GEMINI_REQUEST_TIMEOUT_MS }) {
   const key = String(apiKey || '').trim();
   if (!key) throw mealError('Add your Gemini API key in Settings first.', 'أضف مفتاح Gemini API من الإعدادات أولًا.', TypeError);
   if (typeof fetchImpl !== 'function') throw mealError('This browser does not support the request API.', 'هذا المتصفح لا يدعم واجهة الطلبات.', Error);
   const request = buildGeminiRequest({ model, items, clarifications });
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const duration = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) >= 0 ? Number(timeoutMs) : GEMINI_REQUEST_TIMEOUT_MS;
+  const timeoutError = mealError('The Gemini request timed out.', 'انتهت مهلة طلب Gemini.', Error);
+  let timeoutId;
+  let timedOut = false;
   let response;
+  let payload;
   try {
-    response = await fetchImpl(request.url, {
-      method: 'POST',
-      headers: { ...request.headers, 'x-goog-api-key': key },
-      body: JSON.stringify(request.body),
+    const timeout = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        timedOut = true;
+        controller?.abort();
+        reject(timeoutError);
+      }, duration);
     });
+    const operation = (async () => {
+      const result = await fetchImpl(request.url, {
+        method: 'POST',
+        headers: { ...request.headers, 'x-goog-api-key': key },
+        body: JSON.stringify(request.body),
+        ...(controller ? { signal: controller.signal } : {}),
+      });
+      let body;
+      try { body = await result.json(); } catch { body = null; }
+      return { response: result, payload: body };
+    })();
+    ({ response, payload } = await Promise.race([operation, timeout]));
   } catch (error) {
+    if (timedOut) throw timeoutError;
     const message = String(error?.message || 'Request failed').split(key).join('[redacted]');
     throw new Error(`تعذر الاتصال بخدمة Gemini: ${message} / Could not reach Gemini: ${message}`);
+  } finally {
+    clearTimeout(timeoutId);
   }
-  let payload;
-  try { payload = await response.json(); } catch { payload = null; }
   if (!response.ok) {
     const message = String(payload?.error?.message || response.statusText || 'Request rejected').split(key).join('[redacted]');
     throw new Error(`خطأ في واجهة Gemini (HTTP ${response.status}): ${message} / Gemini API error (HTTP ${response.status}): ${message}`);
